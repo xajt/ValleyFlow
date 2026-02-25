@@ -1,99 +1,97 @@
 import { useState, useEffect } from 'react'
+import { AppProvider, useApp } from './store'
+import {
+  RecordingOverlay,
+  SettingsWindow,
+  HistoryWindow,
+  WelcomeWizard,
+} from './components'
 
-interface TranscriptionEvent {
-  type: string
-  payload: string | boolean | number
-}
+function AppContent() {
+  const {
+    settings,
+    isRecording,
+    isProcessing,
+    recordingTime,
+    setRecording,
+    setProcessing,
+    setRecordingTime,
+    addToHistory,
+  } = useApp()
 
-declare global {
-  interface Window {
-    __TAURI__?: {
-      event: {
-        listen: <T>(
-          event: string,
-          handler: (event: { payload: T }) => void
-        ) => Promise<() => void>
-      }
-    }
-  }
-}
+  const [showSettings, setShowSettings] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
+  const [showWizard, setShowWizard] = useState(!settings.hasCompletedWizard)
 
-type AppStatus =
-  | 'idle'
-  | 'recording'
-  | 'processing'
-  | 'success'
-  | 'error'
-
-function App() {
-  const [status, setStatus] = useState<AppStatus>('idle')
-  const [recordingTime, setRecordingTime] = useState(0)
-  const [lastTranscription, setLastTranscription] = useState('')
-  const [errorMessage, setErrorMessage] = useState('')
-  const [language, setLanguage] = useState<'pl' | 'en'>('pl')
-
+  // Listen for Tauri events
   useEffect(() => {
     if (!window.__TAURI__) return
 
     const unlisteners: (() => void)[] = []
 
-    // Listen for recording state changes
     window.__TAURI__.event.listen<boolean>('recording-state', (event) => {
+      setRecording(event.payload)
       if (event.payload) {
-        setStatus('recording')
         setRecordingTime(0)
-        setErrorMessage('')
-      } else {
-        setStatus('processing')
       }
     }).then((unlisten) => unlisteners.push(unlisten))
 
-    // Listen for processing state
     window.__TAURI__.event.listen<boolean>('recording-processing', (event) => {
-      if (!event.payload) {
-        setStatus('success')
-        setTimeout(() => setStatus('idle'), 2000)
-      }
+      setProcessing(event.payload)
     }).then((unlisten) => unlisteners.push(unlisten))
 
-    // Listen for raw transcription
-    window.__TAURI__.event.listen<string>('transcription-raw', (event) => {
-      console.log('Raw transcription:', event.payload)
-    }).then((unlisten) => unlisteners.push(unlisten))
-
-    // Listen for completed transcription
     window.__TAURI__.event.listen<string>('transcription-complete', (event) => {
-      setLastTranscription(event.payload)
-      console.log('Final transcription:', event.payload)
+      addToHistory({
+        text: event.payload,
+        rawText: event.payload, // TODO: get raw text separately
+        language: settings.language,
+      })
     }).then((unlisten) => unlisteners.push(unlisten))
 
-    // Listen for errors
-    window.__TAURI__.event.listen<string>('recording-error', (event) => {
-      setStatus('error')
-      setErrorMessage(event.payload)
-      setTimeout(() => setStatus('idle'), 3000)
+    return () => {
+      unlisteners.forEach((unlisten) => unlisten())
+    }
+  }, [setRecording, setProcessing, setRecordingTime, addToHistory, settings.language])
+
+  // Recording timer
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval>
+    if (isRecording) {
+      interval = setInterval(() => {
+        setRecordingTime((t) => (t >= 299 ? t : t + 1))
+      }, 1000)
+    }
+    return () => clearInterval(interval)
+  }, [isRecording, setRecordingTime])
+
+  // Listen for tray menu events
+  useEffect(() => {
+    if (!window.__TAURI__) return
+
+    const unlisteners: (() => void)[] = []
+
+    window.__TAURI__.event.listen('open-settings', () => {
+      setShowSettings(true)
     }).then((unlisten) => unlisteners.push(unlisten))
 
-    // Cleanup
+    window.__TAURI__.event.listen('open-history', () => {
+      setShowHistory(true)
+    }).then((unlisten) => unlisteners.push(unlisten))
+
     return () => {
       unlisteners.forEach((unlisten) => unlisten())
     }
   }, [])
 
-  // Recording timer
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>
-    if (status === 'recording') {
-      interval = setInterval(() => {
-        setRecordingTime((t) => {
-          // Auto-stop at 5 minutes (300 seconds)
-          if (t >= 299) return t
-          return t + 1
-        })
-      }, 1000)
-    }
-    return () => clearInterval(interval)
-  }, [status])
+  const handleCancelRecording = () => {
+    setRecording(false)
+    setRecordingTime(0)
+    // In production, this would notify the Rust backend
+  }
+
+  const handleWizardComplete = () => {
+    setShowWizard(false)
+  }
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60)
@@ -101,82 +99,81 @@ function App() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
   }
 
-  const getStatusText = (): string => {
-    switch (status) {
-      case 'idle':
-        return language === 'pl' ? 'Gotowy' : 'Ready'
-      case 'recording':
-        return language === 'pl' ? 'Nagrywanie...' : 'Recording...'
-      case 'processing':
-        return language === 'pl' ? 'Przetwarzanie...' : 'Processing...'
-      case 'success':
-        return language === 'pl' ? 'Skopiowano!' : 'Copied!'
-      case 'error':
-        return language === 'pl' ? 'Błąd' : 'Error'
-    }
+  // Show wizard on first run
+  if (showWizard) {
+    return <WelcomeWizard onComplete={handleWizardComplete} />
   }
 
   return (
-    <div className="container">
-      <h1>ValleyFlow</h1>
+    <div className="app">
+      {/* Main content (hidden when in tray mode) */}
+      <div className="main-content">
+        <h1>ValleyFlow</h1>
 
-      <div className={`status-indicator ${status}`}>
-        <span className="status-text">{getStatusText()}</span>
-        {status === 'recording' && (
-          <span className="timer">{formatTime(recordingTime)}</span>
-        )}
-      </div>
+        <div className={`status-indicator ${isRecording ? 'recording' : isProcessing ? 'processing' : 'idle'}`}>
+          {isRecording && (
+            <>
+              <span className="recording-dot"></span>
+              <span>{settings.language === 'pl' ? 'Nagrywanie' : 'Recording'}...</span>
+              <span className="timer">{formatTime(recordingTime)}</span>
+            </>
+          )}
+          {isProcessing && (
+            <>
+              <div className="spinner-small"></div>
+              <span>{settings.language === 'pl' ? 'Przetwarzanie' : 'Processing'}...</span>
+            </>
+          )}
+          {!isRecording && !isProcessing && (
+            <span>{settings.language === 'pl' ? 'Gotowy' : 'Ready'}</span>
+          )}
+        </div>
 
-      {status === 'recording' && (
         <p className="hint">
-          {language === 'pl'
-            ? 'Naciśnij Ctrl+Shift+Space aby zakończyć'
-            : 'Press Ctrl+Shift+Space to stop'}
-        </p>
-      )}
-
-      {status === 'idle' && (
-        <p className="hint">
-          {language === 'pl'
+          {settings.language === 'pl'
             ? 'Naciśnij Ctrl+Shift+Space aby rozpocząć nagrywanie'
             : 'Press Ctrl+Shift+Space to start recording'}
         </p>
-      )}
 
-      {status === 'processing' && (
-        <div className="processing">
-          <div className="spinner"></div>
+        <div className="quick-actions">
+          <button onClick={() => setShowSettings(true)}>
+            {settings.language === 'pl' ? 'Ustawienia' : 'Settings'}
+          </button>
+          <button onClick={() => setShowHistory(true)}>
+            {settings.language === 'pl' ? 'Historia' : 'History'}
+          </button>
         </div>
-      )}
-
-      {status === 'error' && (
-        <p className="error">{errorMessage}</p>
-      )}
-
-      {lastTranscription && status === 'idle' && (
-        <div className="last-transcription">
-          <p className="label">
-            {language === 'pl' ? 'Ostatnia transkrypcja:' : 'Last transcription:'}
-          </p>
-          <p className="text">{lastTranscription}</p>
-        </div>
-      )}
-
-      <div className="language-toggle">
-        <button
-          className={language === 'pl' ? 'active' : ''}
-          onClick={() => setLanguage('pl')}
-        >
-          PL
-        </button>
-        <button
-          className={language === 'en' ? 'active' : ''}
-          onClick={() => setLanguage('en')}
-        >
-          EN
-        </button>
       </div>
+
+      {/* Recording Overlay */}
+      <RecordingOverlay onCancel={handleCancelRecording} />
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <SettingsWindow onClose={() => setShowSettings(false)} />
+          </div>
+        </div>
+      )}
+
+      {/* History Modal */}
+      {showHistory && (
+        <div className="modal-overlay" onClick={() => setShowHistory(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <HistoryWindow onClose={() => setShowHistory(false)} />
+          </div>
+        </div>
+      )}
     </div>
+  )
+}
+
+function App() {
+  return (
+    <AppProvider>
+      <AppContent />
+    </AppProvider>
   )
 }
 
